@@ -69,3 +69,12 @@ Durations use `humantime` format, e.g., `250ms`, `10s`, `2m`, `1h`.
 - On connect timeout, the client socket is closed and the attempt is logged as an error.
 - On session timeout, both sockets are closed and a warning is logged.
 - No authentication, authorization, or TLS.
+
+## License
+
+Licensed under either of
+
+- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE))
+- MIT License ([LICENSE-MIT](LICENSE-MIT))
+
+at your option.
