@@ -15,11 +15,11 @@ use tracing::Instrument;
 static NEXT_CONN_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Parser, Debug)]
-/// A simple TCP port-forwarding proxy.
+/// A simple TCP port-forwarding proxy
 ///
 /// Address format:
 /// - IPv4: A.B.C.D:PORT (e.g., 127.0.0.1:5001)
-/// - IPv6: [IPv6]:PORT (e.g., [::1]:9000) — bracketed per RFC 3986; IPv6 text per RFC 5952.
+/// - IPv6: [IPv6]:PORT (e.g., [::1]:9000)
 ///
 /// Examples:
 ///   tcp-proxy --listen 127.0.0.1:5001 --to 127.0.0.1:9000
@@ -70,6 +70,7 @@ async fn handle_connection(
     };
 
     let res = if session_timeout.is_zero() {
+        // If zero, there is no timeout and the proxying runs until the connection closes
         tokio::io::copy_bidirectional(&mut client_socket, &mut remote_socket).await.map(Some)
     } else {
         match time::timeout(session_timeout, tokio::io::copy_bidirectional(&mut client_socket, &mut remote_socket)).await {
