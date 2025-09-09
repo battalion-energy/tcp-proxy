@@ -96,8 +96,8 @@ async fn handle_connection(
 }
 
 #[tokio::main]
-async fn main() -> stdio::Result<()> {
-    // Initialize logging with env filter. Example: RUST_LOG=tcp_proxy=debug,info
+async fn main() -> std::io::Result<()> {
+    // Initialize logging from RUST_LOG or default to info
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
         .with_target(false)
@@ -135,6 +135,7 @@ async fn main() -> stdio::Result<()> {
         }
     }
 
+    // Close listener so no further accepts happen
     drop(listener);
 
     while let Some(res) = tasks.join_next().await {
