@@ -15,15 +15,33 @@ use tracing::Instrument;
 static NEXT_CONN_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Parser, Debug)]
-#[command(name = "tcp-proxy", about = "A simple TCP port-forwarding proxy")]
+/// A simple TCP port-forwarding proxy.
+///
+/// Address format:
+/// - IPv4: A.B.C.D:PORT (e.g., 127.0.0.1:5001)
+/// - IPv6: [IPv6]:PORT (e.g., [::1]:9000) — bracketed per RFC 3986; IPv6 text per RFC 5952.
+///
+/// Examples:
+///   tcp-proxy --listen 127.0.0.1:5001 --to 127.0.0.1:9000
+///   tcp-proxy --listen 0.0.0.0:5000 --to 10.1.1.10:6000 --connect-timeout 2s
+#[command(
+    name = "tcp-proxy",
+    version,
+    about = "Forward TCP connections from --listen to --to",
+    long_about = None
+)]
 struct Cli {
-    #[arg(long = "listen")]
+    /// Local address:port to accept client connections (e.g., 127.0.0.1:5001)
+    #[arg(long = "listen", value_name = "ADDR:PORT")]
     listen: SocketAddr,
-    #[arg(long = "to")]
+    /// Remote target address:port to forward to (e.g., 127.0.0.1:9000)
+    #[arg(long = "to", value_name = "ADDR:PORT")]
     to: SocketAddr,
-    #[arg(long = "connect-timeout", default_value = "5s", value_parser = humantime::parse_duration)]
+    /// Max time to establish the outbound connection (humantime, e.g., 2s, 500ms)
+    #[arg(long = "connect-timeout", default_value = "5s", value_parser = humantime::parse_duration, value_name = "DURATION")]
     connect_timeout: Duration,
-    #[arg(long = "session-timeout", default_value = "0s", value_parser = humantime::parse_duration)]
+    /// Max lifetime of a proxied connection; 0s by default (disables the timeout)
+    #[arg(long = "session-timeout", default_value = "0s", value_parser = humantime::parse_duration, value_name = "DURATION")]
     session_timeout: Duration,
 }
 
