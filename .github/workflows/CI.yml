@@ -1,0 +1,106 @@
+name: Rust CI
+
+on:
+  push:
+    tags:
+      - "v*.*.*"  # e.g., v1.2.3 triggers a release
+
+env:
+  CARGO_TERM_COLOR: always
+  CROSS_VERSION: "0.2.5"
+
+permissions:
+  contents: write
+
+jobs:
+  version:
+    name: Determine Version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      release_version: ${{ steps.version.outputs.release_version }}
+      should_release: ${{ steps.version.outputs.should_release }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      - name: Determine version tag
+        id: version
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            VERSION=${GITHUB_REF#refs/tags/v}
+            SHOULD_RELEASE=true
+            echo "Releasing version: $VERSION"
+            echo "release_version=$VERSION" >> $GITHUB_OUTPUT
+          else
+            VERSION=$(git rev-parse --short HEAD)
+            SHOULD_RELEASE=false
+            echo "Not generating release, version: $VERSION"
+            echo "release_version=" >> $GITHUB_OUTPUT
+          fi
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "should_release=$SHOULD_RELEASE" >> $GITHUB_OUTPUT
+
+  build-musl:
+    name: Build musl binaries
+    needs: version
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        target: [x86_64-unknown-linux-musl, aarch64-unknown-linux-musl]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          targets: ${{ matrix.target }}
+          cache: true
+      - name: Install cross
+        run: cargo install cross --version ${{ env.CROSS_VERSION }} --locked
+      - name: Build (cross)
+        run: |
+          cross build --release --target ${{ matrix.target }} --bin tcp-proxy
+          cross build --release --target ${{ matrix.target }} --bin echo-server
+      - name: Package artifacts
+        env:
+          VER: ${{ needs.version.outputs.release_version }}
+        run: |
+          set -euxo pipefail
+          TARGET="${{ matrix.target }}"
+          BIN_DIR="target/${TARGET}/release"
+          OUTDIR="dist/${TARGET}"
+          mkdir -p "${OUTDIR}"
+          cp "${BIN_DIR}/tcp-proxy" "${OUTDIR}/"
+          cp "${BIN_DIR}/echo-server" "${OUTDIR}/"
+          cp README.md LICENSE-MIT LICENSE-APACHE "${OUTDIR}/"
+          tar -C dist -czf "tcp-proxy-${VER}-${TARGET}.tar.gz" "${TARGET}"
+          sha256sum "tcp-proxy-${VER}-${TARGET}.tar.gz" > "tcp-proxy-${VER}-${TARGET}.tar.gz.sha256"
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: tcp-proxy-${{ matrix.target }}
+          path: |
+            tcp-proxy-*.tar.gz
+            tcp-proxy-*.tar.gz.sha256
+
+  release:
+    name: Create Release
+    if: needs.version.outputs.should_release == 'true'
+    needs: [version, build-musl]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: tcp-proxy-*
+          merge-multiple: true
+          path: dist
+      - name: Create GitHub Release
+        run: |
+          ls -l dist
+          gh release create "v${{ needs.version.outputs.release_version }}" \
+            --title "tcp-proxy v${{ needs.version.outputs.release_version }}" \
+            --generate-notes \
+            dist/*
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
