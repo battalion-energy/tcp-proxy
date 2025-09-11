@@ -11,6 +11,3 @@ humantime = "2.1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 
-[[bin]]
-name = "tcp-proxy"
-path = "src/main.rs"
