@@ -1,5 +1,4 @@
 use clap::Parser;
-use std::io as stdio;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
@@ -8,9 +7,9 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::signal;
 use tokio::task::JoinSet;
 use tokio::time;
+use tracing::Instrument;
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
-use tracing::Instrument;
 
 static NEXT_CONN_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -71,9 +70,16 @@ async fn handle_connection(
 
     let res = if session_timeout.is_zero() {
         // If zero, there is no timeout and the proxying runs until the connection closes
-        tokio::io::copy_bidirectional(&mut client_socket, &mut remote_socket).await.map(Some)
+        tokio::io::copy_bidirectional(&mut client_socket, &mut remote_socket)
+            .await
+            .map(Some)
     } else {
-        match time::timeout(session_timeout, tokio::io::copy_bidirectional(&mut client_socket, &mut remote_socket)).await {
+        match time::timeout(
+            session_timeout,
+            tokio::io::copy_bidirectional(&mut client_socket, &mut remote_socket),
+        )
+        .await
+        {
             Ok(inner) => inner.map(Some),
             Err(_) => Ok(None),
         }
@@ -81,7 +87,11 @@ async fn handle_connection(
 
     match res {
         Ok(Some((c_to_r, r_to_c))) => {
-            info!(client_to_remote = c_to_r, remote_to_client = r_to_c, "Closed connection");
+            info!(
+                client_to_remote = c_to_r,
+                remote_to_client = r_to_c,
+                "Closed connection"
+            );
         }
         Ok(None) => {
             warn!(timeout = ?session_timeout, "Session timeout");
@@ -99,7 +109,9 @@ async fn handle_connection(
 async fn main() -> std::io::Result<()> {
     // Initialize logging from RUST_LOG or default to info
     tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
+        .with_env_filter(
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
+        )
         .with_target(false)
         .init();
 

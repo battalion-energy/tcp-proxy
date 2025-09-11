@@ -14,7 +14,3 @@ tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 [[bin]]
 name = "tcp-proxy"
 path = "src/main.rs"
-
-[[bin]]
-name = "echo-server"
-path = "src/echo-server.rs"
