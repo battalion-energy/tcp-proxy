@@ -1,3 +1,4 @@
+use anyhow::Context;
 use clap::Parser;
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -103,7 +104,7 @@ async fn handle_connection(
 }
 
 #[tokio::main]
-async fn main() -> std::io::Result<()> {
+async fn main() -> anyhow::Result<()> {
     // Initialize logging from RUST_LOG or default to info
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -113,7 +114,10 @@ async fn main() -> std::io::Result<()> {
         .init();
 
     let args = Cli::parse();
-    let listener = TcpListener::bind(args.listen).await?;
+    let listener = TcpListener::bind(args.listen)
+        .await
+        .context("unable to bind listener")?;
+
     info!(listen = %args.listen, to = %args.to, "Listening (Ctrl+C to stop accepting)");
 
     let mut tasks: JoinSet<()> = JoinSet::new();
