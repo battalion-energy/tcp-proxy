@@ -135,7 +135,6 @@ async fn main() -> std::io::Result<()> {
                     Ok((socket, client_addr)) => {
                         let id = NEXT_CONN_ID.fetch_add(1, Ordering::Relaxed);
                         info!(id = id, client = %client_addr, "Accepted connection");
-                        let to = to;
                         let span = tracing::info_span!("conn", id = id, client = %client_addr, remote = %to);
                         tasks.spawn(async move {
                             handle_connection(socket, to, connect_timeout, session_timeout).await;
