@@ -46,7 +46,7 @@ async fn connect(remote_addr: SocketAddr, connect_timeout: Duration) -> anyhow::
     let stream = time::timeout(connect_timeout, TcpStream::connect(remote_addr))
         .await
         .context("connect timed out")?
-        .context("failed to connect")?;
+        .context("failed to connect to remote")?;
 
     Ok(stream)
 }
