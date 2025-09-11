@@ -1,6 +1,5 @@
 use clap::Parser;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream};
@@ -10,8 +9,6 @@ use tokio::time;
 use tracing::Instrument;
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
-
-static NEXT_CONN_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Parser, Debug)]
 /// A simple TCP port-forwarding proxy
@@ -124,6 +121,8 @@ async fn main() -> std::io::Result<()> {
     let connect_timeout = args.connect_timeout;
     let session_timeout = args.session_timeout;
 
+    let mut next_conn_id: u64 = 1;
+
     loop {
         tokio::select! {
             _ = signal::ctrl_c() => {
@@ -133,7 +132,8 @@ async fn main() -> std::io::Result<()> {
             res = listener.accept() => {
                 match res {
                     Ok((socket, client_addr)) => {
-                        let id = NEXT_CONN_ID.fetch_add(1, Ordering::Relaxed);
+                        let id = next_conn_id;
+                        next_conn_id += 1;
                         info!(id = id, client = %client_addr, "Accepted connection");
                         let span = tracing::info_span!("conn", id = id, client = %client_addr, remote = %to);
                         tasks.spawn(async move {
