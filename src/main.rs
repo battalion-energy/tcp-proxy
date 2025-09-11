@@ -42,29 +42,22 @@ struct Cli {
     session_timeout: Duration,
 }
 
+async fn connect(remote_addr: SocketAddr, connect_timeout: Duration) -> anyhow::Result<TcpStream> {
+    let stream = time::timeout(connect_timeout, TcpStream::connect(remote_addr))
+        .await
+        .context("connect timed out")?
+        .context("failed to connect")?;
+
+    Ok(stream)
+}
+
 async fn handle_connection(
     mut client_socket: TcpStream,
     remote_addr: SocketAddr,
     connect_timeout: Duration,
     session_timeout: Duration,
-) {
-    let connect = time::timeout(connect_timeout, TcpStream::connect(remote_addr)).await;
-    let mut remote_socket = match connect {
-        Ok(Ok(s)) => {
-            info!("Connected");
-            s
-        }
-        Ok(Err(e)) => {
-            error!(error = %e, "Failed to connect");
-            let _ = client_socket.shutdown().await;
-            return;
-        }
-        Err(_) => {
-            error!(timeout = ?connect_timeout, "Connect timeout");
-            let _ = client_socket.shutdown().await;
-            return;
-        }
-    };
+) -> anyhow::Result<()> {
+    let mut remote_socket = connect(remote_addr, connect_timeout).await?;
 
     let res = if session_timeout.is_zero() {
         // If zero, there is no timeout and the proxying runs until the connection closes
@@ -101,6 +94,8 @@ async fn handle_connection(
 
     let _ = client_socket.shutdown().await;
     let _ = remote_socket.shutdown().await;
+
+    Ok(())
 }
 
 #[tokio::main]
@@ -141,7 +136,9 @@ async fn main() -> anyhow::Result<()> {
                         info!(id = id, client = %client_addr, "Accepted connection");
                         let span = tracing::info_span!("conn", id = id, client = %client_addr, remote = %to);
                         tasks.spawn(async move {
-                            handle_connection(socket, to, connect_timeout, session_timeout).await;
+                            if let Err(err) = handle_connection(socket, to, connect_timeout, session_timeout).await {
+                                warn!("connection error: {err}");
+                            }
                         }.instrument(span));
                     }
                     Err(e) => warn!(error = %e, "Failed to accept connection"),
