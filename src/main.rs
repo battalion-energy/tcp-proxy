@@ -38,8 +38,8 @@ struct Cli {
     #[arg(long = "connect-timeout", default_value = "5s", value_parser = humantime::parse_duration, value_name = "DURATION")]
     connect_timeout: Duration,
     /// Max lifetime of a proxied connection; 0s by default (disables the timeout)
-    #[arg(long = "session-timeout", default_value = "0s", value_parser = humantime::parse_duration, value_name = "DURATION")]
-    session_timeout: Duration,
+    #[arg(long = "session-timeout", value_parser = humantime::parse_duration, value_name = "DURATION")]
+    session_timeout: Option<Duration>,
 }
 
 async fn connect(remote_addr: SocketAddr, connect_timeout: Duration) -> anyhow::Result<TcpStream> {
@@ -59,21 +59,14 @@ async fn handle_connection(
 ) -> anyhow::Result<()> {
     let mut remote_socket = connect(remote_addr, connect_timeout).await?;
 
-    let res = if session_timeout.is_zero() {
-        // If zero, there is no timeout and the proxying runs until the connection closes
-        tokio::io::copy_bidirectional(&mut client_socket, &mut remote_socket)
-            .await
-            .map(Some)
-    } else {
-        match time::timeout(
-            session_timeout,
-            tokio::io::copy_bidirectional(&mut client_socket, &mut remote_socket),
-        )
-        .await
-        {
-            Ok(inner) => inner.map(Some),
-            Err(_) => Ok(None),
-        }
+    let res = match time::timeout(
+        session_timeout,
+        tokio::io::copy_bidirectional(&mut client_socket, &mut remote_socket),
+    )
+    .await
+    {
+        Ok(inner) => inner.map(Some),
+        Err(_) => Ok(None),
     };
 
     match res {
@@ -118,7 +111,7 @@ async fn main() -> anyhow::Result<()> {
     let mut tasks: JoinSet<()> = JoinSet::new();
     let to = args.to;
     let connect_timeout = args.connect_timeout;
-    let session_timeout = args.session_timeout;
+    let session_timeout = args.session_timeout.unwrap_or(Duration::MAX);
 
     let mut next_conn_id: u64 = 1;
 
