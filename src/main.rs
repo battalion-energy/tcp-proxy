@@ -2,7 +2,6 @@ use anyhow::Context;
 use clap::Parser;
 use std::net::SocketAddr;
 use std::time::Duration;
-use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::signal;
 use tokio::task::JoinSet;
@@ -37,9 +36,6 @@ struct Cli {
     /// Max time to establish the outbound connection (humantime, e.g., 2s, 500ms)
     #[arg(long = "connect-timeout", default_value = "5s", value_parser = humantime::parse_duration, value_name = "DURATION")]
     connect_timeout: Duration,
-    /// Max lifetime of a proxied connection; 0s by default (disables the timeout)
-    #[arg(long = "session-timeout", value_parser = humantime::parse_duration, value_name = "DURATION")]
-    session_timeout: Option<Duration>,
 }
 
 async fn connect(remote_addr: SocketAddr, connect_timeout: Duration) -> anyhow::Result<TcpStream> {
@@ -55,40 +51,14 @@ async fn handle_connection(
     mut client_socket: TcpStream,
     remote_addr: SocketAddr,
     connect_timeout: Duration,
-    session_timeout: Duration,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<(u64, u64)> {
     let mut remote_socket = connect(remote_addr, connect_timeout).await?;
 
-    let res = match time::timeout(
-        session_timeout,
-        tokio::io::copy_bidirectional(&mut client_socket, &mut remote_socket),
-    )
-    .await
-    {
-        Ok(inner) => inner.map(Some),
-        Err(_) => Ok(None),
-    };
+    let stats = tokio::io::copy_bidirectional(&mut client_socket, &mut remote_socket)
+        .await
+        .context("proxying data")?;
 
-    match res {
-        Ok(Some((c_to_r, r_to_c))) => {
-            info!(
-                client_to_remote = c_to_r,
-                remote_to_client = r_to_c,
-                "Closed connection"
-            );
-        }
-        Ok(None) => {
-            warn!(timeout = ?session_timeout, "Session timeout");
-        }
-        Err(e) => {
-            error!(error = %e, "Piping error");
-        }
-    }
-
-    let _ = client_socket.shutdown().await;
-    let _ = remote_socket.shutdown().await;
-
-    Ok(())
+    Ok(stats)
 }
 
 #[tokio::main]
@@ -111,7 +81,6 @@ async fn main() -> anyhow::Result<()> {
     let mut tasks: JoinSet<()> = JoinSet::new();
     let to = args.to;
     let connect_timeout = args.connect_timeout;
-    let session_timeout = args.session_timeout.unwrap_or(Duration::MAX);
 
     let mut next_conn_id: u64 = 1;
 
@@ -129,8 +98,13 @@ async fn main() -> anyhow::Result<()> {
                         info!(id = id, client = %client_addr, "Accepted connection");
                         let span = tracing::info_span!("conn", id = id, client = %client_addr, remote = %to);
                         tasks.spawn(async move {
-                            if let Err(err) = handle_connection(socket, to, connect_timeout, session_timeout).await {
-                                warn!("connection error: {err}");
+                            match handle_connection(socket, to, connect_timeout).await {
+                                Ok((c_to_r, r_to_c)) => {
+                                    info!(client_to_remote = c_to_r, remote_to_client = r_to_c, "closed connection");
+                                }
+                                Err(err) => {
+                                    error!("session error: {err}");
+                                }
                             }
                         }.instrument(span));
                     }
