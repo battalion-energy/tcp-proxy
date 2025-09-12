@@ -36,22 +36,15 @@ struct Cli {
     #[arg(long = "connect-timeout", default_value = "5s", value_parser = humantime::parse_duration, value_name = "DURATION")]
     connect_timeout: Duration,
 }
-
-async fn connect(remote_addr: SocketAddr, connect_timeout: Duration) -> anyhow::Result<TcpStream> {
-    let stream = time::timeout(connect_timeout, TcpStream::connect(remote_addr))
-        .await
-        .context("connect timed out")?
-        .context("failed to connect to remote")?;
-
-    Ok(stream)
-}
-
 async fn handle_connection(
     mut client_socket: TcpStream,
     remote_addr: SocketAddr,
     connect_timeout: Duration,
 ) -> anyhow::Result<(u64, u64)> {
-    let mut remote_socket = connect(remote_addr, connect_timeout).await?;
+    let mut remote_socket = time::timeout(connect_timeout, TcpStream::connect(remote_addr))
+        .await
+        .context("connect timed out")?
+        .context("failed to connect to remote")?;
 
     let stats = tokio::io::copy_bidirectional(&mut client_socket, &mut remote_socket)
         .await
