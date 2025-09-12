@@ -87,7 +87,7 @@ async fn main() -> anyhow::Result<()> {
         .await
         .context("unable to bind listener")?;
 
-    info!(listen = %args.listen, to = %args.to, "Listening (Ctrl+C to stop accepting)");
+    info!(listen = %args.listen, to = %args.to, "listening (Ctrl+C exits immediately)");
 
     let to = args.to;
     let connect_timeout = args.connect_timeout;
@@ -97,7 +97,7 @@ async fn main() -> anyhow::Result<()> {
     loop {
         tokio::select! {
             _ = signal::ctrl_c() => {
-                info!("ctrl+c received — stopping accepting");
+                info!("Ctrl+C received — exiting immediately");
                 return Ok(());
             }
             res = listener.accept() => {
@@ -105,11 +105,11 @@ async fn main() -> anyhow::Result<()> {
                     Ok((socket, client_addr)) => {
                         let id = next_conn_id;
                         next_conn_id += 1;
-                        info!(id = id, client = %client_addr, "Accepted connection");
+                        info!(id = id, client = %client_addr, "accepted connection");
                         let span = tracing::info_span!("conn", id = id, client = %client_addr, remote = %to);
                         tokio::spawn(handle_connection(socket, to, connect_timeout).instrument(span));
                     }
-                    Err(e) => warn!(error = %e, "Failed to accept connection"),
+                    Err(e) => warn!(error = %e, "failed to accept connection"),
                 }
             }
         }
