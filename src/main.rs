@@ -4,7 +4,6 @@ use std::net::SocketAddr;
 use std::time::Duration;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::signal;
-use tokio::task::JoinSet;
 use tokio::time;
 use tracing::Instrument;
 use tracing::{error, info, warn};
@@ -78,7 +77,6 @@ async fn main() -> anyhow::Result<()> {
 
     info!(listen = %args.listen, to = %args.to, "Listening (Ctrl+C to stop accepting)");
 
-    let mut tasks: JoinSet<()> = JoinSet::new();
     let to = args.to;
     let connect_timeout = args.connect_timeout;
 
@@ -87,8 +85,8 @@ async fn main() -> anyhow::Result<()> {
     loop {
         tokio::select! {
             _ = signal::ctrl_c() => {
-                info!("Ctrl+C received — stopping accept and waiting for active connections...");
-                break;
+                info!("ctrl+c received — stopping accepting");
+                return Ok(());
             }
             res = listener.accept() => {
                 match res {
@@ -97,7 +95,7 @@ async fn main() -> anyhow::Result<()> {
                         next_conn_id += 1;
                         info!(id = id, client = %client_addr, "Accepted connection");
                         let span = tracing::info_span!("conn", id = id, client = %client_addr, remote = %to);
-                        tasks.spawn(async move {
+                        tokio::spawn(async move {
                             match handle_connection(socket, to, connect_timeout).await {
                                 Ok((c_to_r, r_to_c)) => {
                                     info!(client_to_remote = c_to_r, remote_to_client = r_to_c, "closed connection");
@@ -113,16 +111,4 @@ async fn main() -> anyhow::Result<()> {
             }
         }
     }
-
-    // Close listener so no further accepts happen
-    drop(listener);
-
-    while let Some(res) = tasks.join_next().await {
-        if let Err(e) = res {
-            error!(error = %e, "A connection task ended with an error");
-        }
-    }
-
-    info!("Shutdown complete.");
-    Ok(())
 }
