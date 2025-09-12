@@ -4,6 +4,7 @@ on:
   push:
     tags:
       - "v*.*.*"  # e.g., v1.2.3 triggers a release
+  pull_request:
 
 env:
   CARGO_TERM_COLOR: always
@@ -59,7 +60,6 @@ jobs:
       - name: Build (cross)
         run: |
           cross build --release --target ${{ matrix.target }} --bin tcp-proxy
-          cross build --release --target ${{ matrix.target }} --bin echo-server
       - name: Package artifacts
         env:
           VER: ${{ needs.version.outputs.release_version }}
@@ -70,7 +70,6 @@ jobs:
           OUTDIR="dist/${TARGET}"
           mkdir -p "${OUTDIR}"
           cp "${BIN_DIR}/tcp-proxy" "${OUTDIR}/"
-          cp "${BIN_DIR}/echo-server" "${OUTDIR}/"
           cp README.md LICENSE-MIT LICENSE-APACHE "${OUTDIR}/"
           tar -C dist -czf "tcp-proxy-${VER}-${TARGET}.tar.gz" "${TARGET}"
           sha256sum "tcp-proxy-${VER}-${TARGET}.tar.gz" > "tcp-proxy-${VER}-${TARGET}.tar.gz.sha256"
