@@ -6,7 +6,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::signal;
 use tokio::time;
 use tracing::Instrument;
-use tracing::{error, info, warn};
+use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
 #[derive(Parser, Debug)]
@@ -37,20 +37,39 @@ struct Cli {
     connect_timeout: Duration,
 }
 async fn handle_connection(
-    mut client_socket: TcpStream,
+    client_socket: TcpStream,
     remote_addr: SocketAddr,
     connect_timeout: Duration,
-) -> anyhow::Result<(u64, u64)> {
-    let mut remote_socket = time::timeout(connect_timeout, TcpStream::connect(remote_addr))
-        .await
-        .context("connect timed out")?
-        .context("failed to connect to remote")?;
+) {
+    async fn handle_connection_inner(
+        mut client_socket: TcpStream,
+        remote_addr: SocketAddr,
+        connect_timeout: Duration,
+    ) -> anyhow::Result<(u64, u64)> {
+        let mut remote_socket = time::timeout(connect_timeout, TcpStream::connect(remote_addr))
+            .await
+            .context("connect timed out")?
+            .context("failed to connect to remote")?;
 
-    let stats = tokio::io::copy_bidirectional(&mut client_socket, &mut remote_socket)
-        .await
-        .context("proxying data")?;
+        let stats = tokio::io::copy_bidirectional(&mut client_socket, &mut remote_socket)
+            .await
+            .context("proxying data")?;
 
-    Ok(stats)
+        Ok(stats)
+    }
+
+    match handle_connection_inner(client_socket, remote_addr, connect_timeout).await {
+        Ok((c_to_r, r_to_c)) => {
+            info!(
+                client_to_remote = c_to_r,
+                remote_to_client = r_to_c,
+                "closed connection"
+            );
+        }
+        Err(err) => {
+            warn!("session error: {err}");
+        }
+    }
 }
 
 #[tokio::main]
@@ -88,16 +107,7 @@ async fn main() -> anyhow::Result<()> {
                         next_conn_id += 1;
                         info!(id = id, client = %client_addr, "Accepted connection");
                         let span = tracing::info_span!("conn", id = id, client = %client_addr, remote = %to);
-                        tokio::spawn(async move {
-                            match handle_connection(socket, to, connect_timeout).await {
-                                Ok((c_to_r, r_to_c)) => {
-                                    info!(client_to_remote = c_to_r, remote_to_client = r_to_c, "closed connection");
-                                }
-                                Err(err) => {
-                                    error!("session error: {err}");
-                                }
-                            }
-                        }.instrument(span));
+                        tokio::spawn(handle_connection(socket, to, connect_timeout).instrument(span));
                     }
                     Err(e) => warn!(error = %e, "Failed to accept connection"),
                 }
