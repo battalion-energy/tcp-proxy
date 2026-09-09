@@ -36,41 +36,6 @@ struct Cli {
     #[arg(long = "connect-timeout", default_value = "5s", value_parser = humantime::parse_duration, value_name = "DURATION")]
     connect_timeout: Duration,
 }
-async fn handle_connection(
-    client_socket: TcpStream,
-    remote_addr: SocketAddr,
-    connect_timeout: Duration,
-) {
-    async fn handle_connection_inner(
-        mut client_socket: TcpStream,
-        remote_addr: SocketAddr,
-        connect_timeout: Duration,
-    ) -> anyhow::Result<(u64, u64)> {
-        let mut remote_socket = time::timeout(connect_timeout, TcpStream::connect(remote_addr))
-            .await
-            .context("connect timed out")?
-            .context("failed to connect to remote")?;
-
-        let stats = tokio::io::copy_bidirectional(&mut client_socket, &mut remote_socket)
-            .await
-            .context("proxying data")?;
-
-        Ok(stats)
-    }
-
-    match handle_connection_inner(client_socket, remote_addr, connect_timeout).await {
-        Ok((c_to_r, r_to_c)) => {
-            info!(
-                client_to_remote = c_to_r,
-                remote_to_client = r_to_c,
-                "closed connection"
-            );
-        }
-        Err(err) => {
-            warn!("session error: {err}");
-        }
-    }
-}
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -112,6 +77,42 @@ async fn main() -> anyhow::Result<()> {
                     Err(e) => warn!(error = %e, "failed to accept connection"),
                 }
             }
+        }
+    }
+}
+
+async fn handle_connection(
+    client_socket: TcpStream,
+    remote_addr: SocketAddr,
+    connect_timeout: Duration,
+) {
+    async fn handle_connection_inner(
+        mut client_socket: TcpStream,
+        remote_addr: SocketAddr,
+        connect_timeout: Duration,
+    ) -> anyhow::Result<(u64, u64)> {
+        let mut remote_socket = time::timeout(connect_timeout, TcpStream::connect(remote_addr))
+            .await
+            .context("connect timed out")?
+            .context("failed to connect to remote")?;
+
+        let stats = tokio::io::copy_bidirectional(&mut client_socket, &mut remote_socket)
+            .await
+            .context("proxying data")?;
+
+        Ok(stats)
+    }
+
+    match handle_connection_inner(client_socket, remote_addr, connect_timeout).await {
+        Ok((c_to_r, r_to_c)) => {
+            info!(
+                client_to_remote = c_to_r,
+                remote_to_client = r_to_c,
+                "closed connection"
+            );
+        }
+        Err(err) => {
+            warn!("session error: {err}");
         }
     }
 }
