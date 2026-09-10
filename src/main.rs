@@ -27,13 +27,13 @@ use tracing_subscriber::EnvFilter;
 )]
 struct Cli {
     /// Local address:port to accept client connections (e.g., 127.0.0.1:5001)
-    #[arg(long = "listen", value_name = "ADDR:PORT")]
+    #[arg(short, long = "listen", value_name = "ADDR:PORT")]
     listen: SocketAddr,
     /// Remote target address:port to forward to (e.g., 127.0.0.1:9000)
-    #[arg(long = "to", value_name = "ADDR:PORT")]
+    #[arg(short, long = "to", value_name = "ADDR:PORT")]
     to: SocketAddr,
     /// Max time to establish the outbound connection (humantime, e.g., 2s, 500ms)
-    #[arg(long = "connect-timeout", default_value = "5s", value_parser = humantime::parse_duration, value_name = "DURATION")]
+    #[arg(short, long = "connect-timeout", default_value = "5s", value_parser = humantime::parse_duration, value_name = "DURATION")]
     connect_timeout: Duration,
 }
 
