@@ -73,9 +73,10 @@ async fn accept_connections(listener: TcpListener, remote: SocketAddr, connect_t
             Ok((socket, client_addr)) => {
                 let id = next_conn_id;
                 next_conn_id += 1;
-                info!(id = id, client = %client_addr,  "accepted connection");
-                let span =
-                    tracing::info_span!("conn", id = id, client = %client_addr, remote = %remote);
+
+                let span = tracing::info_span!("conn", id, client = %client_addr, remote = %remote);
+                span.in_scope(|| info!("accepted connection"));
+
                 tokio::spawn(handle_connection(socket, remote, connect_timeout).instrument(span));
             }
             Err(e) => warn!(error = %e, "failed to accept connection"),
