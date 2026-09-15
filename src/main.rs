@@ -1,6 +1,8 @@
-use anyhow::Context;
+use anyhow::{Context, Result};
 use clap::Parser;
-use std::net::SocketAddr;
+use socket2::{Domain, Protocol, Socket, Type};
+use std::net::{Ipv4Addr, SocketAddr};
+use std::str::FromStr;
 use std::time::Duration;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::signal;
@@ -32,6 +34,9 @@ struct Cli {
     /// Max time to establish the outbound connection (humantime, e.g., 2s, 500ms)
     #[arg(short, long = "connect-timeout", default_value = "5s", value_parser = humantime::parse_duration, value_name = "DURATION")]
     connect_timeout: Duration,
+    ///
+    #[arg(short, long = "interface", default_value = "tailscale0", value_name = "IFACE|any")]
+    interface: Interface,
 }
 
 #[tokio::main]
@@ -46,23 +51,50 @@ async fn main() -> anyhow::Result<()> {
 
     let args = Cli::parse();
 
-    for proxy in args.proxies {
-        let listener = TcpListener::bind(proxy.listen)
-            .await
-            .context("unable to bind listener")?;
+    let listeners = configure_listeners(args.proxies, args.interface)?;
 
-        info!(listen = %proxy.listen, to = %&proxy.target, "listening (Ctrl+C exits immediately)");
+    for (listener, target) in listeners {
+        info!(listen = %listener.local_addr()?, to = %target, "listening (Ctrl+C exits immediately)");
 
-        tokio::spawn(accept_connections(
-            listener,
-            proxy.target,
-            args.connect_timeout,
-        ));
+        tokio::spawn(accept_connections(listener, target, args.connect_timeout));
     }
 
     let _ = signal::ctrl_c().await;
     info!("Ctrl+C received — exiting immediately");
     Ok(())
+}
+
+fn configure_listeners(
+    proxies: Vec<Proxy>,
+    interface: Interface,
+) -> Result<Vec<(TcpListener, SocketAddr)>> {
+    let mut listeners = vec![];
+
+    for proxy in proxies {
+        let listener = bind_listener(proxy.listen, interface.clone())?;
+        listeners.push((listener, proxy.target))
+    }
+
+    Ok(listeners)
+}
+
+fn bind_listener(addr: ProxyListener, interface: Interface) -> Result<TcpListener> {
+    let addr = match addr {
+        ProxyListener::Port(port) => SocketAddr::from((Ipv4Addr::UNSPECIFIED, port)),
+        ProxyListener::Address(socket_addr) => socket_addr,
+    };
+
+    let socket = Socket::new(Domain::for_address(addr), Type::STREAM, Some(Protocol::TCP))?;
+    socket.set_reuse_address(true)?;
+    
+    if let Some(name) = interface.device_name() {
+        socket.bind_device(Some(name.as_bytes()))?;
+    };
+
+    socket.bind(&addr.into())?;
+    socket.listen(1024)?;
+    socket.set_nonblocking(true)?;
+    anyhow::Ok(TcpListener::from_std(socket.into())?)
 }
 
 async fn accept_connections(listener: TcpListener, remote: SocketAddr, connect_timeout: Duration) {
@@ -121,10 +153,28 @@ async fn handle_connection(
 }
 
 /// One listener, one proxy
-#[derive(Clone, Debug, Parser)]
+#[derive(Clone, Debug)]
 struct Proxy {
-    listen: SocketAddr,
+    listen: ProxyListener,
     target: SocketAddr,
+}
+
+#[derive(Clone, Debug)]
+pub enum ProxyListener {
+    Port(u16),
+    Address(SocketAddr),
+}
+
+impl FromStr for ProxyListener {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if let Ok(addr) = s.parse::<SocketAddr>() {
+            return Ok(Self::Address(addr))
+        };
+
+        Ok(Self::Port(s.parse::<u16>()?))
+    }
 }
 
 fn parse_proxy(s: &str) -> Result<Proxy, anyhow::Error> {
@@ -140,4 +190,44 @@ fn parse_proxy(s: &str) -> Result<Proxy, anyhow::Error> {
             .parse()
             .context("bad target address {target:?}: {e}")?,
     })
+}
+
+#[derive(Clone, Debug)]
+pub enum Interface {
+    Any,
+    Tailscale0,
+    Device(String),
+}
+
+impl Interface {
+    fn device_name(&self) -> Option<&str> {
+        match self {
+            Interface::Any => None,
+            Interface::Tailscale0 => Some("tailscale0"),
+            Interface::Device(name) => Some(name),
+        }
+    }
+}
+
+impl FromStr for Interface {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "any" => Ok(Self::Any),
+            "tailscale0" => Ok(Self::Tailscale0),
+            name => Ok(Self::Device(name.to_string()))
+        }
+    }
+}
+
+impl std::fmt::Display for Interface {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let str = match self {
+            Interface::Any => "any",
+            Interface::Tailscale0 => "tailscale0",
+            Interface::Device(device) => device,
+        };
+        f.write_str(str)
+    }
 }
