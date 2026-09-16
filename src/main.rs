@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
 use clap::Parser;
 use socket2::{Domain, Protocol, Socket, Type};
 use std::net::{Ipv4Addr, SocketAddr};
@@ -51,10 +51,15 @@ async fn main() -> anyhow::Result<()> {
 
     let args = Cli::parse();
 
-    let listeners = configure_listeners(args.proxies, args.interface)?;
+    let listeners = configure_listeners(args.proxies, &args.interface)?;
 
     for (listener, target) in listeners {
-        info!(listen = %listener.local_addr()?, to = %target, "listening (Ctrl+C exits immediately)");
+        info!(
+            listen = %listener.local_addr()?,
+            to = %target,
+            interface = args.interface.device_name().unwrap_or("any"),
+            "listening (Ctrl+C exits immediately)"
+        );
 
         tokio::spawn(accept_connections(listener, target, args.connect_timeout));
     }
@@ -66,19 +71,19 @@ async fn main() -> anyhow::Result<()> {
 
 fn configure_listeners(
     proxies: Vec<Proxy>,
-    interface: Interface,
+    interface: &Interface,
 ) -> Result<Vec<(TcpListener, SocketAddr)>> {
     let mut listeners = vec![];
 
     for proxy in proxies {
-        let listener = bind_listener(proxy.listen, interface.clone())?;
+        let listener = bind_listener(proxy.listen, interface)?;
         listeners.push((listener, proxy.target))
     }
 
     Ok(listeners)
 }
 
-fn bind_listener(addr: ProxyListener, interface: Interface) -> Result<TcpListener> {
+fn bind_listener(addr: ProxyListener, interface: &Interface) -> Result<TcpListener> {
     let addr = match addr {
         ProxyListener::Port(port) => SocketAddr::from((Ipv4Addr::UNSPECIFIED, port)),
         ProxyListener::Address(socket_addr) => socket_addr,
@@ -88,7 +93,15 @@ fn bind_listener(addr: ProxyListener, interface: Interface) -> Result<TcpListene
     socket.set_reuse_address(true)?;
     
     if let Some(name) = interface.device_name() {
+        // SO_BINDTODEVICE is Linux-only, and socket2 cfg-gates it away entirely,
+        // so the call has to be compiled out rather than just skipped.
+        #[cfg(target_os = "linux")]
         socket.bind_device(Some(name.as_bytes()))?;
+
+        #[cfg(not(target_os = "linux"))]
+        anyhow::bail!(
+            "--interface {name} needs SO_BINDTODEVICE, which only exists on Linux; use \"any\""
+        );
     };
 
     socket.bind(&addr.into())?;
@@ -185,10 +198,10 @@ fn parse_proxy(s: &str) -> Result<Proxy, anyhow::Error> {
     Ok(Proxy {
         listen: listen
             .parse()
-            .context("bad listen address {listen:?}: {e}")?,
+            .map_err(|e| anyhow!("bad listen address {listen:?}: {e}"))?,
         target: target
             .parse()
-            .context("bad target address {target:?}: {e}")?,
+            .map_err(|e| anyhow!("bad target address {target:?}: {e}"))?,
     })
 }
 
