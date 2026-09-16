@@ -1,94 +1,71 @@
 # tcp-proxy
 
-A small, async TCP port-forwarding proxy built with Rust and Tokio. It listens on one or more local ports and forwards raw bytes bidirectionally to a target address/port. Listeners are restricted to a single network interface by default. Includes structured logging via `tracing`.
+A small, async TCP port-forwarding proxy built with Rust and Tokio. Listens on one or more local ports, forwards raw bytes bidirectionally to a target, and logs through `tracing`.
 
 ## Quick Start
 
 ```bash
-# Build
 cargo build --release
 
-# Run (info logs by default)
-RUST_LOG=info ./target/release/tcp-proxy --proxy 5000=127.0.0.1:6000
+# port 5001 on tailscale0 -> 127.0.0.1:6000
+RUST_LOG=info ./target/release/tcp-proxy tailscale0 --proxy 5001=127.0.0.1:6000
 ```
-
-That listens on port 5000 of `tailscale0` and forwards to `127.0.0.1:6000`. Nothing arriving on any other interface is accepted.
 
 ## Usage
 
 ```text
-tcp-proxy --proxy <LISTEN=TARGET>... \
-          [--interface <IFACE|any>] \
-          [--connect-timeout <DURATION>]
+tcp-proxy [--connect-timeout <DURATION>] <COMMAND>
+
+  tailscale0   --proxy <PORT=TARGET>...
+  device IFACE --proxy <PORT=TARGET>...
+  any          --proxy <ADDR:PORT=TARGET>...
 ```
 
-- `--proxy <LISTEN=TARGET>` (`-p`): forwarding rule, repeat the flag for more than one. `TARGET` is always `ADDR:PORT`. `LISTEN` is either:
-  - `PORT` (e.g. `5001`), bound on every address of the chosen interface. Requires an interface, so it is rejected with `--interface any`.
-- `ADDR:PORT` (e.g. `127.0.0.1:5001`, `[::1]:5001`), bound on that address. Always accepted.
-- `--interface <IFACE|any>` (`-i`): interface to restrict listeners to. Defaults to `tailscale0`. Use `any` for no restriction, which binds the listen address as given.
-- `--connect-timeout <DURATION>` (`-c`): max time to establish the outbound connection (default: `5s`).
+The subcommand decides what listeners bind to, and with it the form `--proxy` (`-p`) takes. Under `tailscale0` and `device` the listener is named by port alone and restricted to that interface, so nothing arriving elsewhere is accepted. Under `any` there is no restriction, so the listener needs a full address. `TARGET` is always `ADDR:PORT`.
 
-Durations use `humantime` format, e.g., `250ms`, `10s`, `2m`, `1h`.
+Repeat `--proxy` for more than one listener. All of them share the one interface.
+
+`--connect-timeout` (`-c`) caps the outbound connect, default `5s`, in `humantime` format (`250ms`, `2m`, `1h`).
 
 ### Examples
 
-- Two listeners on the tailnet, different backends:
+```bash
+# two listeners on the tailnet
+tcp-proxy tailscale0 -p 5001=10.1.1.10:6000 -p 5002=10.1.1.11:6000
 
-  ```bash
-  RUST_LOG=info tcp-proxy --proxy 5001=10.1.1.10:6000 --proxy 5002=10.1.1.11:6000
-  ```
+# another interface
+tcp-proxy device wg0 -p 5001=127.0.0.1:9000
 
-- A different interface:
+# unrestricted, with a 2s connect timeout
+tcp-proxy any -p 0.0.0.0:5000=10.1.1.10:6000 -c 2s
+```
 
-  ```bash
-  tcp-proxy --interface wg0 --proxy 5001=127.0.0.1:9000
-  ```
+Local test with netcat, which needs `any` because loopback is not an interface you can restrict to usefully:
 
-- No interface restriction, listening on all addresses:
-
-  ```bash
-  tcp-proxy --interface any --proxy 0.0.0.0:5000=10.1.1.10:6000
-  ```
-
-- With a 2s connect timeout:
-
-  ```bash
-  tcp-proxy --proxy 5000=127.0.0.1:6000 --connect-timeout 2s
-  ```
-
-- Quick local test with netcat, which needs `--interface any` since loopback is not the default interface:
-
-  ```bash
-  # Terminal A: echo server on 6000
-  nc -lk 127.0.0.1 6000
-
-  # Terminal B: run proxy 5001 -> 6000
-  tcp-proxy --interface any --proxy 127.0.0.1:5001=127.0.0.1:6000
-
-  # Terminal C: connect to proxy and type
-  nc 127.0.0.1 5001
-  ```
+```bash
+nc -lk 127.0.0.1 6000                                   # backend
+tcp-proxy any -p 127.0.0.1:5001=127.0.0.1:6000          # proxy
+nc 127.0.0.1 5001                                       # client
+```
 
 ## Interface binding
 
-Restriction uses `SO_BINDTODEVICE`, which is Linux-only. On other platforms the proxy still runs, but asking for an interface fails at startup; use `--interface any` there.
+Restriction uses `SO_BINDTODEVICE`. It needs no privileges, but it is Linux-only: `tailscale0` and `device` are accepted everywhere and fail at startup elsewhere. Use `any` there.
 
-Two things it does not do. It is not a firewall: a local process can still reach the interface's own address. And the bind address and the interface are independent, so `--proxy 127.0.0.1:5001=...` with the default interface binds loopback *and* restricts to `tailscale0`, which nothing can reach. The startup log reports both so this is visible.
+It is not a firewall. A local process can still reach the interface's own address; what the restriction excludes is traffic arriving on other interfaces. Who may connect over the tailnet is a Tailscale ACL question.
+
+A bare port binds `0.0.0.0`, so IPv6 peers are refused even when the interface has a v6 address.
 
 ## Logging
 
-- Uses `tracing` with environment-based filtering. Default level is `info`.
-- Control verbosity with `RUST_LOG`:
-  - `RUST_LOG=warn tcp-proxy ...` (only warnings and errors)
-  - `RUST_LOG=info tcp-proxy ...` (normal output; default)
-  - `RUST_LOG=tcp_proxy=debug tcp-proxy ...` (enable debug for this crate only)
-- Each listener logs its bound address, target, and interface at startup.
-- Connection context: logs emitted while handling a connection are prefixed with a span like `conn{id=..., client=..., remote=...}`. Connection ids count per listener, so `(remote, id)` identifies a session.
+`RUST_LOG` sets the level, default `info`. `RUST_LOG=tcp_proxy=debug` scopes it to this crate.
+
+Each listener logs its bound address, target, and interface at startup. Per-connection events carry a `conn{id, client, remote}` span. Ids count per listener, so `(remote, id)` identifies a session.
 
 ## Notes
 
-- On Ctrl+C, the proxy exits immediately; active connections are aborted.
-- On connect timeout, the client socket is closed and the attempt is logged as a warning.
+- Ctrl+C exits immediately; active connections are aborted.
+- On connect timeout the client socket is closed and the attempt logged as a warning.
 - No authentication, authorization, or TLS.
 
 ## License

@@ -1,5 +1,5 @@
 use anyhow::{Context, Result, anyhow};
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use socket2::{Domain, Protocol, Socket, Type};
 use std::net::{Ipv4Addr, SocketAddr};
 use std::str::FromStr;
@@ -14,18 +14,13 @@ use tracing_subscriber::EnvFilter;
 #[derive(Parser, Debug)]
 /// A simple TCP port-forwarding proxy
 ///
-/// Every listener is restricted to one network interface, tailscale0 by
-/// default, so the proxy is reachable over the tailnet and nowhere else. Pass
-/// --interface any to bind an address directly with no such restriction.
-///
-/// Listen format, one per --proxy:
-/// - PORT (e.g., 5001), bound on all addresses of the interface
-/// - ADDR:PORT (e.g., 127.0.0.1:5001 or [::1]:5001), bound on that address
+/// The subcommand picks what listeners bind to, and with it the form --proxy
+/// takes: a bare port when an interface is filtering, a full address when not.
 ///
 /// Examples:
-///   tcp-proxy --proxy 5001=127.0.0.1:9000
-///   tcp-proxy --proxy 5001=10.1.1.10:6000 --proxy 5002=10.1.1.11:6000
-///   tcp-proxy --interface any --proxy 0.0.0.0:5000=10.1.1.10:6000
+///   tcp-proxy tailscale0 --proxy 5001=127.0.0.1:9000
+///   tcp-proxy device wg0 --proxy 5001=10.1.1.10:6000 --proxy 5002=10.1.1.11:6000
+///   tcp-proxy any --proxy 0.0.0.0:5000=10.1.1.10:6000
 #[command(
     name = "tcp-proxy",
     version,
@@ -58,14 +53,14 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let args = Cli::parse();
-
-    let listeners = configure_listeners(args.proxies, &args.interface)?;
+    let device = args.interface.device_name();
+    let listeners = configure_listeners(&args.interface, device)?;
 
     for (listener, target) in listeners {
         info!(
             listen = %listener.local_addr()?,
             to = %target,
-            interface = args.interface.device_name().unwrap_or("any"),
+            interface = device.unwrap_or("any"),
             "listening (Ctrl+C exits immediately)"
         );
 
@@ -78,34 +73,34 @@ async fn main() -> anyhow::Result<()> {
 }
 
 fn configure_listeners(
-    proxies: Vec<Proxy<ProxyListener>>,
     interface: &Interface,
+    device: Option<&str>,
 ) -> Result<Vec<(TcpListener, SocketAddr)>> {
-    let mut listeners = vec![];
+    let pairs: Vec<(SocketAddr, SocketAddr)> = match interface {
+        Interface::Any { proxies } => proxies.iter().map(|p| (p.listen, p.target)).collect(),
+        Interface::Tailscale0 { proxies } | Interface::Device { proxies, .. } => proxies
+            .iter()
+            .map(|p| {
+                (
+                    SocketAddr::from((Ipv4Addr::UNSPECIFIED, p.listen)),
+                    p.target,
+                )
+            })
+            .collect(),
+    };
 
-    for proxy in proxies {
-        let listener = bind_listener(proxy.listen, interface)?;
-        listeners.push((listener, proxy.target))
+    let mut listeners = vec![];
+    for (listen, target) in pairs {
+        listeners.push((bind_listener(listen, device)?, target));
     }
 
     Ok(listeners)
 }
 
-fn bind_listener(listen: ProxyListener, interface: &Interface) -> Result<TcpListener> {
-    let device = interface.device_name();
-
-    let addr = match (device, listen) {
-        (None, ProxyListener::Port(port)) => anyhow::bail!(
-            "--interface any needs a full listen address, got bare port {port}; \
-             write ADDR:PORT, e.g. 0.0.0.0:{port}"
-        ),
-        (Some(_), ProxyListener::Port(port)) => SocketAddr::from((Ipv4Addr::UNSPECIFIED, port)),
-        (_, ProxyListener::Address(socket_addr)) => socket_addr,
-    };
-
+fn bind_listener(addr: SocketAddr, device: Option<&str>) -> Result<TcpListener> {
     let socket = Socket::new(Domain::for_address(addr), Type::STREAM, Some(Protocol::TCP))?;
     socket.set_reuse_address(true)?;
-    
+
     if let Some(name) = device {
         // SO_BINDTODEVICE is Linux-only, and socket2 cfg-gates it away entirely,
         // so the call has to be compiled out rather than just skipped.
@@ -113,12 +108,12 @@ fn bind_listener(listen: ProxyListener, interface: &Interface) -> Result<TcpList
         socket.bind_device(Some(name.as_bytes()))?;
 
         #[cfg(not(target_os = "linux"))]
-        anyhow::bail!(
-            "--interface {name} needs SO_BINDTODEVICE, which only exists on Linux; use \"any\""
-        );
-    };
+        anyhow::bail!("interface {name} needs SO_BINDTODEVICE, which only exists on Linux");
+    }
 
-    socket.bind(&addr.into())?;
+    socket
+        .bind(&addr.into())
+        .with_context(|| format!("unable to bind {addr}"))?;
     socket.listen(1024)?;
     socket.set_nonblocking(true)?;
     anyhow::Ok(TcpListener::from_std(socket.into())?)
@@ -210,33 +205,22 @@ where
     }
 }
 
-#[derive(Clone, Debug)]
-pub enum ProxyListener {
-    Port(u16),
-    Address(SocketAddr),
-}
-
-impl FromStr for ProxyListener {
-    type Err = anyhow::Error;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        if let Ok(addr) = s.parse::<SocketAddr>() {
-            return Ok(Self::Address(addr))
-        };
-
-        Ok(Self::Port(s.parse::<u16>()?))
-    }
-}
-
-
 /// What listeners bind to. Each variant carries only the proxies whose listen
 /// form suits it, so the mismatched combination can't be expressed.
+///
+/// Interface restriction needs `SO_BINDTODEVICE`, so `tailscale0` and `device`
+/// are accepted everywhere but fail at startup off Linux.
 #[derive(Debug, Subcommand)]
 enum Interface {
     /// Bind the given addresses directly, with no interface restriction
     Any {
         /// Forwarding rule, repeatable (e.g., 0.0.0.0:5001=127.0.0.1:9000)
-        #[arg(short, long = "proxy", value_name = "ADDR:PORT=TARGET", required = true)]
+        #[arg(
+            short,
+            long = "proxy",
+            value_name = "ADDR:PORT=TARGET",
+            required = true
+        )]
         proxies: Vec<Proxy<SocketAddr>>,
     },
     /// Restrict listeners to the tailscale0 interface
@@ -259,32 +243,9 @@ enum Interface {
 impl Interface {
     fn device_name(&self) -> Option<&str> {
         match self {
-            Interface::Any => None,
-            Interface::Tailscale0 => Some("tailscale0"),
-            Interface::Device(name) => Some(name),
+            Interface::Any { .. } => None,
+            Interface::Tailscale0 { .. } => Some("tailscale0"),
+            Interface::Device { name, .. } => Some(name),
         }
-    }
-}
-
-impl FromStr for Interface {
-    type Err = anyhow::Error;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            "any" => Ok(Self::Any),
-            "tailscale0" => Ok(Self::Tailscale0),
-            name => Ok(Self::Device(name.to_string()))
-        }
-    }
-}
-
-impl std::fmt::Display for Interface {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let str = match self {
-            Interface::Any => "any",
-            Interface::Tailscale0 => "tailscale0",
-            Interface::Device(device) => device,
-        };
-        f.write_str(str)
     }
 }
