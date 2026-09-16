@@ -14,29 +14,37 @@ use tracing_subscriber::EnvFilter;
 #[derive(Parser, Debug)]
 /// A simple TCP port-forwarding proxy
 ///
-/// Address format:
-/// - IPv4: A.B.C.D:PORT (e.g., 127.0.0.1:5001)
-/// - IPv6: [IPv6]:PORT (e.g., [::1]:9000)
+/// Every listener is restricted to one network interface, tailscale0 by
+/// default, so the proxy is reachable over the tailnet and nowhere else. Pass
+/// --interface any to bind an address directly with no such restriction.
+///
+/// Listen format, one per --proxy:
+/// - PORT (e.g., 5001), bound on all addresses of the interface
+/// - ADDR:PORT (e.g., 127.0.0.1:5001 or [::1]:5001), bound on that address
 ///
 /// Examples:
-///   tcp-proxy --listen 127.0.0.1:5001 --to 127.0.0.1:9000
-///   tcp-proxy --listen 0.0.0.0:5000 --to 10.1.1.10:6000 --connect-timeout 2s
+///   tcp-proxy --proxy 5001=127.0.0.1:9000
+///   tcp-proxy --proxy 5001=10.1.1.10:6000 --proxy 5002=10.1.1.11:6000
+///   tcp-proxy --interface any --proxy 0.0.0.0:5000=10.1.1.10:6000
 #[command(
     name = "tcp-proxy",
     version,
-    about = "Forward TCP connections from --listen to --to",
+    about = "Forward TCP connections from each --proxy listener to its target",
     long_about = None
 )]
 struct Cli {
-    /// Local address:port to accept client connections (e.g., 127.0.0.1:5001)
-    #[arg(short, long = "pro", value_name = "LISTEN=TARGET", value_parser = parse_proxy, required = true)]
-    proxies: Vec<Proxy>,
-    /// Max time to establish the outbound connection (humantime, e.g., 2s, 500ms)
-    #[arg(short, long = "connect-timeout", default_value = "5s", value_parser = humantime::parse_duration, value_name = "DURATION")]
-    connect_timeout: Duration,
-    ///
-    #[arg(short, long = "interface", default_value = "tailscale0", value_name = "IFACE|any")]
+    #[command(subcommand)]
     interface: Interface,
+    /// Max time to establish the outbound connection (humantime, e.g., 2s, 500ms)
+    #[arg(
+        short,
+        long = "connect-timeout",
+        global = true,
+        default_value = "5s",
+        value_parser = humantime::parse_duration,
+        value_name = "DURATION"
+    )]
+    connect_timeout: Duration,
 }
 
 #[tokio::main]
@@ -64,13 +72,13 @@ async fn main() -> anyhow::Result<()> {
         tokio::spawn(accept_connections(listener, target, args.connect_timeout));
     }
 
-    let _ = signal::ctrl_c().await;
+    signal::ctrl_c().await?;
     info!("Ctrl+C received — exiting immediately");
     Ok(())
 }
 
 fn configure_listeners(
-    proxies: Vec<Proxy>,
+    proxies: Vec<Proxy<ProxyListener>>,
     interface: &Interface,
 ) -> Result<Vec<(TcpListener, SocketAddr)>> {
     let mut listeners = vec![];
@@ -83,16 +91,22 @@ fn configure_listeners(
     Ok(listeners)
 }
 
-fn bind_listener(addr: ProxyListener, interface: &Interface) -> Result<TcpListener> {
-    let addr = match addr {
-        ProxyListener::Port(port) => SocketAddr::from((Ipv4Addr::UNSPECIFIED, port)),
-        ProxyListener::Address(socket_addr) => socket_addr,
+fn bind_listener(listen: ProxyListener, interface: &Interface) -> Result<TcpListener> {
+    let device = interface.device_name();
+
+    let addr = match (device, listen) {
+        (None, ProxyListener::Port(port)) => anyhow::bail!(
+            "--interface any needs a full listen address, got bare port {port}; \
+             write ADDR:PORT, e.g. 0.0.0.0:{port}"
+        ),
+        (Some(_), ProxyListener::Port(port)) => SocketAddr::from((Ipv4Addr::UNSPECIFIED, port)),
+        (_, ProxyListener::Address(socket_addr)) => socket_addr,
     };
 
     let socket = Socket::new(Domain::for_address(addr), Type::STREAM, Some(Protocol::TCP))?;
     socket.set_reuse_address(true)?;
     
-    if let Some(name) = interface.device_name() {
+    if let Some(name) = device {
         // SO_BINDTODEVICE is Linux-only, and socket2 cfg-gates it away entirely,
         // so the call has to be compiled out rather than just skipped.
         #[cfg(target_os = "linux")]
@@ -165,11 +179,35 @@ async fn handle_connection(
     }
 }
 
-/// One listener, one proxy
+/// One listener, one target. `L` is how the listen side is written, which
+/// depends on whether an interface is doing the filtering.
 #[derive(Clone, Debug)]
-struct Proxy {
-    listen: ProxyListener,
+struct Proxy<L> {
+    listen: L,
     target: SocketAddr,
+}
+
+impl<L> FromStr for Proxy<L>
+where
+    L: FromStr,
+    L::Err: std::fmt::Display,
+{
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self> {
+        // clap names the expected form from value_name, so this only has to
+        // report what was wrong with the value.
+        let (listen, target) = s.split_once('=').context("expected LISTEN=TARGET")?;
+
+        Ok(Self {
+            listen: listen
+                .parse()
+                .map_err(|e| anyhow!("bad listen address {listen:?}: {e}"))?,
+            target: target
+                .parse()
+                .map_err(|e| anyhow!("bad target address {target:?}: {e}"))?,
+        })
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -190,26 +228,32 @@ impl FromStr for ProxyListener {
     }
 }
 
-fn parse_proxy(s: &str) -> Result<Proxy, anyhow::Error> {
-    let (listen, target) = s
-        .split_once('=')
-        .context("expected LISTEN=TARGET, e.g 127.0.0.1:5001=127.0.0.1:9000")?;
 
-    Ok(Proxy {
-        listen: listen
-            .parse()
-            .map_err(|e| anyhow!("bad listen address {listen:?}: {e}"))?,
-        target: target
-            .parse()
-            .map_err(|e| anyhow!("bad target address {target:?}: {e}"))?,
-    })
-}
-
-#[derive(Clone, Debug)]
-pub enum Interface {
-    Any,
-    Tailscale0,
-    Device(String),
+/// What listeners bind to. Each variant carries only the proxies whose listen
+/// form suits it, so the mismatched combination can't be expressed.
+#[derive(Debug, Subcommand)]
+enum Interface {
+    /// Bind the given addresses directly, with no interface restriction
+    Any {
+        /// Forwarding rule, repeatable (e.g., 0.0.0.0:5001=127.0.0.1:9000)
+        #[arg(short, long = "proxy", value_name = "ADDR:PORT=TARGET", required = true)]
+        proxies: Vec<Proxy<SocketAddr>>,
+    },
+    /// Restrict listeners to the tailscale0 interface
+    Tailscale0 {
+        /// Forwarding rule, repeatable (e.g., 5001=127.0.0.1:9000)
+        #[arg(short, long = "proxy", value_name = "PORT=TARGET", required = true)]
+        proxies: Vec<Proxy<u16>>,
+    },
+    /// Restrict listeners to a named interface
+    Device {
+        /// Interface name (e.g., wg0)
+        #[arg(value_name = "IFACE")]
+        name: String,
+        /// Forwarding rule, repeatable (e.g., 5001=127.0.0.1:9000)
+        #[arg(short, long = "proxy", value_name = "PORT=TARGET", required = true)]
+        proxies: Vec<Proxy<u16>>,
+    },
 }
 
 impl Interface {
