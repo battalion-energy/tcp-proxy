@@ -1,7 +1,7 @@
 use anyhow::{Context, Result, anyhow};
-use clap::{Parser, Subcommand};
+use clap::Parser;
 use socket2::{Domain, Protocol, Socket, Type};
-use std::net::{Ipv4Addr, SocketAddr};
+use std::net::{Ipv6Addr, SocketAddr};
 use std::str::FromStr;
 use std::time::Duration;
 use tokio::net::{TcpListener, TcpStream};
@@ -14,13 +14,14 @@ use tracing_subscriber::EnvFilter;
 #[derive(Parser, Debug)]
 /// A simple TCP port-forwarding proxy
 ///
-/// The subcommand picks what listeners bind to, and with it the form --proxy
-/// takes: a bare port when an interface is filtering, a full address when not.
+/// Each --proxy gives a source and a target. An interface name plus a port
+/// restricts that listener to the interface; a full address binds the address
+/// with no restriction.
 ///
 /// Examples:
-///   tcp-proxy tailscale0 --proxy 5001=127.0.0.1:9000
-///   tcp-proxy device wg0 --proxy 5001=10.1.1.10:6000 --proxy 5002=10.1.1.11:6000
-///   tcp-proxy any --proxy 0.0.0.0:5000=10.1.1.10:6000
+///   tcp-proxy --proxy tailscale0:5001=127.0.0.1:9000
+///   tcp-proxy --proxy wg0:5001=10.1.1.10:6000 --proxy wg0:5002=10.1.1.11:6000
+///   tcp-proxy --proxy 0.0.0.0:5000=10.1.1.10:6000
 #[command(
     name = "tcp-proxy",
     version,
@@ -28,13 +29,13 @@ use tracing_subscriber::EnvFilter;
     long_about = None
 )]
 struct Cli {
-    #[command(subcommand)]
-    interface: Interface,
+    /// Forwarding rule, repeatable (e.g., tailscale0:5001=127.0.0.1:9000)
+    #[arg(short, long = "proxy", value_name = "SOURCE=TARGET", required = true)]
+    proxies: Vec<Proxy>,
     /// Max time to establish the outbound connection (humantime, e.g., 2s, 500ms)
     #[arg(
         short,
         long = "connect-timeout",
-        global = true,
         default_value = "5s",
         value_parser = humantime::parse_duration,
         value_name = "DURATION"
@@ -53,14 +54,13 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let args = Cli::parse();
-    let device = args.interface.device_name();
-    let listeners = configure_listeners(&args.interface, device)?;
+    let listeners = configure_listeners(args.proxies)?;
 
     for (listener, target) in listeners {
         info!(
             listen = %listener.local_addr()?,
             to = %target,
-            interface = device.unwrap_or("any"),
+            // interface = device.unwrap_or("any"),
             "listening (Ctrl+C exits immediately)"
         );
 
@@ -72,50 +72,37 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn configure_listeners(
-    interface: &Interface,
-    device: Option<&str>,
-) -> Result<Vec<(TcpListener, SocketAddr)>> {
-    let pairs: Vec<(SocketAddr, SocketAddr)> = match interface {
-        Interface::Any { proxies } => proxies.iter().map(|p| (p.listen, p.target)).collect(),
-        Interface::Tailscale0 { proxies } | Interface::Device { proxies, .. } => proxies
-            .iter()
-            .map(|p| {
-                (
-                    SocketAddr::from((Ipv4Addr::UNSPECIFIED, p.listen)),
-                    p.target,
-                )
-            })
-            .collect(),
-    };
-
+fn configure_listeners(proxies: Vec<Proxy>) -> Result<Vec<(TcpListener, SocketAddr)>> {
     let mut listeners = vec![];
-    for (listen, target) in pairs {
-        listeners.push((bind_listener(listen, device)?, target));
+    for proxy in proxies {
+        listeners.push((bind_listener(proxy.source)?, proxy.destination));
     }
 
     Ok(listeners)
 }
 
-fn bind_listener(addr: SocketAddr, device: Option<&str>) -> Result<TcpListener> {
+fn bind_listener(source: Source) -> Result<TcpListener> {
+    let (addr, device) = match source {
+        Source::Device { device, port } => (
+            SocketAddr::from((Ipv6Addr::UNSPECIFIED, port)),
+            Some(device),
+        ),
+        Source::Addr(addr) => (addr, None),
+    };
+
     let socket = Socket::new(Domain::for_address(addr), Type::STREAM, Some(Protocol::TCP))?;
     socket.set_reuse_address(true)?;
+    if addr.is_ipv6() {
+        socket.set_only_v6(false)?;
+    }
 
     if let Some(name) = device {
-        // SO_BINDTODEVICE is Linux-only, and socket2 cfg-gates it away entirely,
-        // so the call has to be compiled out rather than just skipped.
-        #[cfg(target_os = "linux")]
         socket
             .bind_device(Some(name.as_bytes()))
             .with_context(|| format!("binding to interface: {name}"))?;
-
-        #[cfg(not(target_os = "linux"))]
-        anyhow::bail!("interface {name} needs SO_BINDTODEVICE, which only exists on Linux");
     }
+    socket.bind(&addr.into())?;
 
-    socket
-        .bind(&addr.into())
-        .with_context(|| format!("unable to bind {addr}"))?;
     socket.listen(1024)?;
     socket.set_nonblocking(true)?;
     anyhow::Ok(TcpListener::from_std(socket.into())?)
@@ -176,78 +163,68 @@ async fn handle_connection(
     }
 }
 
-/// One listener, one target. `L` is how the listen side is written, which
-/// depends on whether an interface is doing the filtering.
+/// One listener and the target its connections are forwarded to.
 #[derive(Clone, Debug)]
-struct Proxy<L> {
-    listen: L,
-    target: SocketAddr,
+struct Proxy {
+    source: Source,
+    destination: SocketAddr,
 }
 
-impl<L> FromStr for Proxy<L>
-where
-    L: FromStr,
-    L::Err: std::fmt::Display,
-{
+/// Where a listener binds.
+///
+/// `Device` restricts it to one interface with `SO_BINDTODEVICE`, which is
+/// Linux-only, and binds the unspecified address so the device does the
+/// filtering. `Addr` binds exactly what it is given.
+#[derive(Clone, Debug)]
+enum Source {
+    Device { device: String, port: u16 },
+    Addr(SocketAddr),
+}
+
+impl FromStr for Proxy {
     type Err = anyhow::Error;
 
     fn from_str(s: &str) -> Result<Self> {
         // clap names the expected form from value_name, so this only has to
         // report what was wrong with the value.
-        let (listen, target) = s.split_once('=').context("expected LISTEN=TARGET")?;
+        let (source, destination) = s.split_once('=').context("expected LISTEN=TARGET")?;
 
         Ok(Self {
-            listen: listen
+            source: source
                 .parse()
-                .map_err(|e| anyhow!("bad listen address {listen:?}: {e}"))?,
-            target: target
+                .map_err(|e| anyhow!("bad source address {source:?}: {e}"))?,
+            destination: destination
                 .parse()
-                .map_err(|e| anyhow!("bad target address {target:?}: {e}"))?,
+                .map_err(|e| anyhow!("bad destination address {destination:?}: {e}"))?,
         })
     }
 }
 
-/// What listeners bind to. Each variant carries only the proxies whose listen
-/// form suits it, so the mismatched combination can't be expressed.
-///
-/// Interface restriction needs `SO_BINDTODEVICE`, so `tailscale0` and `device`
-/// are accepted everywhere but fail at startup off Linux.
-#[derive(Debug, Subcommand)]
-enum Interface {
-    /// Bind the given addresses directly, with no interface restriction
-    Any {
-        /// Forwarding rule, repeatable (e.g., 0.0.0.0:5001=127.0.0.1:9000)
-        #[arg(
-            short,
-            long = "proxy",
-            value_name = "ADDR:PORT=TARGET",
-            required = true
-        )]
-        proxies: Vec<Proxy<SocketAddr>>,
-    },
-    /// Restrict listeners to the tailscale0 interface
-    Tailscale0 {
-        /// Forwarding rule, repeatable (e.g., 5001=127.0.0.1:9000)
-        #[arg(short, long = "proxy", value_name = "PORT=TARGET", required = true)]
-        proxies: Vec<Proxy<u16>>,
-    },
-    /// Restrict listeners to a named interface
-    Device {
-        /// Interface name (e.g., wg0)
-        #[arg(value_name = "IFACE")]
-        name: String,
-        /// Forwarding rule, repeatable (e.g., 5001=127.0.0.1:9000)
-        #[arg(short, long = "proxy", value_name = "PORT=TARGET", required = true)]
-        proxies: Vec<Proxy<u16>>,
-    },
-}
+impl FromStr for Source {
+    type Err = anyhow::Error;
 
-impl Interface {
-    fn device_name(&self) -> Option<&str> {
-        match self {
-            Interface::Any { .. } => None,
-            Interface::Tailscale0 { .. } => Some("tailscale0"),
-            Interface::Device { name, .. } => Some(name),
+    fn from_str(s: &str) -> Result<Self> {
+        match s.parse::<SocketAddr>() {
+            Ok(socket) => Ok(Self::Addr(socket)),
+            Err(_) => {
+                let (device, port) = s.split_once(':').context("expected <DEVICE|IP>:<PORT>")?;
+                if device.is_empty() {
+                    return Err(anyhow!("device name must be present"));
+                }
+
+                // Parsing here so that port isn't an unused variable on non-linux builds.
+                let port = port.parse()?;
+
+                #[cfg(not(target_os = "linux"))]
+                anyhow::bail!(
+                    "interface {device} needs SO_BINDTODEVICE, which only exists on Linux"
+                );
+
+                Ok(Self::Device {
+                    device: device.to_string(),
+                    port,
+                })
+            }
         }
     }
 }
