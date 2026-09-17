@@ -105,7 +105,9 @@ fn bind_listener(addr: SocketAddr, device: Option<&str>) -> Result<TcpListener> 
         // SO_BINDTODEVICE is Linux-only, and socket2 cfg-gates it away entirely,
         // so the call has to be compiled out rather than just skipped.
         #[cfg(target_os = "linux")]
-        socket.bind_device(Some(name.as_bytes()))?;
+        socket
+            .bind_device(Some(name.as_bytes()))
+            .with_context(|| format!("binding to interface: {name}"))?;
 
         #[cfg(not(target_os = "linux"))]
         anyhow::bail!("interface {name} needs SO_BINDTODEVICE, which only exists on Linux");
