@@ -97,7 +97,9 @@ fn bind_listener(source: &Source) -> Result<TcpListener> {
         TcpSocket::new_v4()?
     };
     // TcpListener::bind sets this for us, TcpSocket does not. Without it a
-    // restart fails to bind while old connections sit in TIME_WAIT.
+    // restart fails to bind while old connections sit in TIME_WAIT. Windows
+    // gives it different semantics that allow binding a port in active use.
+    #[cfg(not(windows))]
     socket.set_reuseaddr(true)?;
 
     #[cfg(target_os = "linux")]
