@@ -125,7 +125,12 @@ async fn accept_connections(listener: TcpListener, remote: SocketAddr, connect_t
 
                 tokio::spawn(handle_connection(socket, remote, connect_timeout).instrument(span));
             }
-            Err(e) => warn!(error = %e, "failed to accept connection"),
+            Err(e) => {
+                warn!(error = %e, "failed to accept connection");
+                // Errors like EMFILE persist until something closes, so
+                // retrying immediately would spin and flood the log.
+                time::sleep(Duration::from_millis(100)).await;
+            }
         }
     }
 }
