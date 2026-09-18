@@ -86,12 +86,9 @@ fn configure_listeners(proxies: Vec<Proxy>) -> Result<Vec<(Proxy, TcpListener)>>
 }
 
 fn bind_listener(source: &Source) -> Result<TcpListener> {
-    let (addr, device) = match source {
-        Source::Device { device, port } => (
-            SocketAddr::from((Ipv4Addr::UNSPECIFIED, *port)),
-            Some(device),
-        ),
-        Source::Addr(addr) => (*addr, None),
+    let addr = match source {
+        Source::Device { port, .. } => SocketAddr::from((Ipv4Addr::UNSPECIFIED, *port)),
+        Source::Addr(addr) => *addr,
     };
 
     let socket = if addr.is_ipv6() {
@@ -103,8 +100,9 @@ fn bind_listener(source: &Source) -> Result<TcpListener> {
     // restart fails to bind while old connections sit in TIME_WAIT.
     socket.set_reuseaddr(true)?;
 
-    if let Some(name) = device {
-        socket.bind_device(Some(name.as_bytes()))?;
+    #[cfg(target_os = "linux")]
+    if let Source::Device { device, .. } = source {
+        socket.bind_device(Some(device.as_bytes()))?;
     }
     socket.bind(addr)?;
 
@@ -231,13 +229,13 @@ impl FromStr for Source {
                     return Err(anyhow!("device name must be present"));
                 }
 
-                // Parsing here so that port isn't an unused variable on non-linux builds.
                 let port = port.parse()?;
 
-                #[cfg(not(target_os = "linux"))]
-                anyhow::bail!(
-                    "interface {device} needs SO_BINDTODEVICE, which only exists on Linux"
-                );
+                if cfg!(not(target_os = "linux")) {
+                    anyhow::bail!(
+                        "interface {device} needs SO_BINDTODEVICE, which only exists on Linux"
+                    );
+                }
 
                 Ok(Self::Device {
                     device: device.to_string(),
