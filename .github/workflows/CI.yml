@@ -55,6 +55,10 @@ jobs:
         with:
           target: ${{ matrix.target }}
           cache: true
+          # Without this both matrix legs share one cache key. The cross images
+          # have different glibc versions (musl x86_64 is 20.04, aarch64 is
+          # 18.04), so host build scripts cached by one leg won't run in the other.
+          cache-key: ${{ matrix.target }}
       - name: Install cross
         run: cargo install cross --version ${{ env.CROSS_VERSION }} --locked
       - name: Build (cross)
