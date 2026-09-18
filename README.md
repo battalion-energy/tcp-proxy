@@ -1,73 +1,72 @@
 # tcp-proxy
 
-A small, async TCP port‑forwarding proxy built with Rust and Tokio. It listens on a local address/port and forwards raw bytes bidirectionally to a target address/port. Includes structured logging via `tracing`.
+A small, async TCP port-forwarding proxy built with Rust and Tokio. Listens on one or more local ports, forwards raw bytes bidirectionally to a target, and logs through `tracing`.
 
 ## Quick Start
 
 ```bash
-# Build
 cargo build --release
 
-# Run (info logs by default)
-RUST_LOG=info ./target/release/tcp-proxy \
-  --listen 127.0.0.1:5000 \
-  --to 127.0.0.1:6000
+# port 5001 on tailscale0 -> 127.0.0.1:6000
+RUST_LOG=info ./target/release/tcp-proxy --proxy tailscale0:5001=127.0.0.1:6000
 ```
 
 ## Usage
 
 ```text
-tcp-proxy --listen <ADDR:PORT> --to <ADDR:PORT> \
-          [--connect-timeout <DURATION>]
+tcp-proxy --proxy <SOURCE=TARGET>... [--connect-timeout <DURATION>]
 ```
 
-- `--listen <ADDR:PORT>`: Local address:port to accept client connections (e.g., `0.0.0.0:5000`).
-- `--to <ADDR:PORT>`: Remote target address:port to forward to (e.g., `10.1.1.10:6000`).
-- `--connect-timeout <DURATION>`: Max time to establish the outbound connection (default: `5s`).
+`--proxy` (`-p`) takes a source and a target, and repeats for more than one listener. `TARGET` is always `ADDR:PORT`. `SOURCE` is one of:
 
-Durations use `humantime` format, e.g., `250ms`, `10s`, `2m`, `1h`.
+- `IFACE:PORT` (e.g. `tailscale0:5001`), which binds the port and restricts the listener to that interface. Traffic arriving on any other interface is not accepted.
+- `ADDR:PORT` (e.g. `0.0.0.0:5001`, `127.0.0.1:5001`), which binds that address with no interface restriction.
+
+The two are told apart by whether the source parses as an address, so each `--proxy` picks its own form and different listeners can use different interfaces.
+
+`--connect-timeout` (`-c`) caps the outbound connect, default `5s`, in `humantime` format (`250ms`, `2m`, `1h`).
 
 ### Examples
 
-- Forward local port 5000 to 10.1.1.10:6000:
+```bash
+# two listeners on the tailnet, different backends
+tcp-proxy -p tailscale0:5001=10.1.1.10:6000 -p tailscale0:5002=10.1.1.11:6000
 
-  ```bash
-  RUST_LOG=info tcp-proxy --listen 0.0.0.0:5000 --to 10.1.1.10:6000
-  ```
+# one per interface in a single process
+tcp-proxy -p tailscale0:5001=127.0.0.1:9000 -p wg0:5001=127.0.0.1:9000
 
-- With a 2s connect timeout:
+# unrestricted, with a 2s connect timeout
+tcp-proxy -p 0.0.0.0:5000=10.1.1.10:6000 -c 2s
+```
 
-  ```bash
-  tcp-proxy --listen 127.0.0.1:5000 --to 127.0.0.1:6000 \
-    --connect-timeout 2s
-  ```
+Local test with netcat:
 
-- Quick local test with netcat:
+```bash
+nc -lk 127.0.0.1 6000                          # backend
+tcp-proxy -p 127.0.0.1:5001=127.0.0.1:6000     # proxy
+nc 127.0.0.1 5001                              # client
+```
 
-  ```bash
-  # Terminal A: echo server on 6000
-  nc -lk 127.0.0.1 6000
+`lo` works as an interface if you want to exercise the restricted path locally: `-p lo:5001=127.0.0.1:6000` is reachable on `127.0.0.1` and refused on every other address.
 
-  # Terminal B: run proxy 5001 -> 6000
-  tcp-proxy --listen 127.0.0.1:5001 --to 127.0.0.1:6000
+## Interface binding
 
-  # Terminal C: connect to proxy and type
-  nc 127.0.0.1 5001
-  ```
+Restriction uses `SO_BINDTODEVICE`. It needs no privileges, but it is Linux-only, so the `IFACE:PORT` form fails at startup elsewhere. A missing interface fails with `No such device (os error 19)`.
+
+It is not a firewall. A local process can still reach the interface's own address; what the restriction excludes is traffic arriving on other interfaces. Who may connect over a tailnet is a Tailscale ACL question.
+
+The restricted form binds `0.0.0.0`, so IPv6 peers are refused even when the interface has a v6 address. Tailscale gives every node both, so a peer connecting by MagicDNS name may try v6 first and fall back.
 
 ## Logging
 
-- Uses `tracing` with environment-based filtering. Default level is `info`.
-- Control verbosity with `RUST_LOG`:
-  - `RUST_LOG=warn tcp-proxy ...` (only warnings and errors)
-  - `RUST_LOG=info tcp-proxy ...` (normal output; default)
-  - `RUST_LOG=tcp_proxy=debug tcp-proxy ...` (enable debug for this crate only)
-- Connection context: logs emitted while handling a connection are prefixed with a span like `conn{id=..., client=..., remote=...}`.
+`RUST_LOG` sets the level, default `info`. `RUST_LOG=tcp_proxy=debug` scopes it to this crate.
+
+Each listener logs its source and target at startup, with the source written as it was given on the command line, so a restricted listener logs `source=tailscale0:5001`. Per-connection events carry a `conn{id, client, remote}` span. Ids count per listener, so `(remote, id)` identifies a session.
 
 ## Notes
 
-- On Ctrl+C, the proxy exits immediately; active connections are aborted.
-- On connect timeout, the client socket is closed and the attempt is logged as a warning.
+- Ctrl+C exits immediately; active connections are aborted.
+- On connect timeout the client socket is closed and the attempt logged as a warning.
 - No authentication, authorization, or TLS.
 
 ## License
