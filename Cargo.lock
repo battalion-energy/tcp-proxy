@@ -390,7 +390,6 @@ dependencies = [
  "anyhow",
  "clap",
  "humantime",
- "socket2",
  "tokio",
  "tracing",
  "tracing-subscriber",

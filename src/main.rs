@@ -1,10 +1,9 @@
 use anyhow::{Context, Result, anyhow};
 use clap::Parser;
-use socket2::{Domain, Protocol, Socket, Type};
-use std::net::{Ipv6Addr, SocketAddr};
+use std::net::{Ipv4Addr, SocketAddr};
 use std::str::FromStr;
 use std::time::Duration;
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::{TcpListener, TcpSocket, TcpStream};
 use tokio::signal;
 use tokio::time;
 use tracing::Instrument;
@@ -84,28 +83,22 @@ fn configure_listeners(proxies: Vec<Proxy>) -> Result<Vec<(TcpListener, SocketAd
 fn bind_listener(source: Source) -> Result<TcpListener> {
     let (addr, device) = match source {
         Source::Device { device, port } => (
-            SocketAddr::from((Ipv6Addr::UNSPECIFIED, port)),
+            SocketAddr::from((Ipv4Addr::UNSPECIFIED, port)),
             Some(device),
         ),
         Source::Addr(addr) => (addr, None),
     };
 
-    let socket = Socket::new(Domain::for_address(addr), Type::STREAM, Some(Protocol::TCP))?;
-    socket.set_reuse_address(true)?;
-    if addr.is_ipv6() {
-        socket.set_only_v6(false)?;
-    }
+    let socket = TcpSocket::new_v4()?;
 
     if let Some(name) = device {
         socket
             .bind_device(Some(name.as_bytes()))
             .with_context(|| format!("binding to interface: {name}"))?;
     }
-    socket.bind(&addr.into())?;
+    socket.bind(addr)?;
 
-    socket.listen(1024)?;
-    socket.set_nonblocking(true)?;
-    anyhow::Ok(TcpListener::from_std(socket.into())?)
+    anyhow::Ok(socket.listen(1024)?)
 }
 
 async fn accept_connections(listener: TcpListener, remote: SocketAddr, connect_timeout: Duration) {
