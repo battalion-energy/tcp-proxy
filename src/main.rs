@@ -53,17 +53,21 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let args = Cli::parse();
+
     let listeners = configure_listeners(args.proxies)?;
 
-    for (listener, target) in listeners {
+    for (proxy, listener) in listeners {
         info!(
-            listen = %listener.local_addr()?,
-            to = %target,
-            // interface = device.unwrap_or("any"),
-            "listening (Ctrl+C exits immediately)"
+            source = %proxy.source,
+            dest = %proxy.destination,
+            "listening"
         );
 
-        tokio::spawn(accept_connections(listener, target, args.connect_timeout));
+        tokio::spawn(accept_connections(
+            listener,
+            proxy.destination,
+            args.connect_timeout,
+        ));
     }
 
     signal::ctrl_c().await?;
@@ -71,22 +75,22 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn configure_listeners(proxies: Vec<Proxy>) -> Result<Vec<(TcpListener, SocketAddr)>> {
-    let mut listeners = vec![];
+fn configure_listeners(proxies: Vec<Proxy>) -> Result<Vec<(Proxy, TcpListener)>> {
+    let mut listeners = Vec::new();
     for proxy in proxies {
-        listeners.push((bind_listener(proxy.source)?, proxy.destination));
+        let listener = bind_listener(&proxy.source)?;
+        listeners.push((proxy, listener));
     }
-
     Ok(listeners)
 }
 
-fn bind_listener(source: Source) -> Result<TcpListener> {
+fn bind_listener(source: &Source) -> Result<TcpListener> {
     let (addr, device) = match source {
         Source::Device { device, port } => (
-            SocketAddr::from((Ipv4Addr::UNSPECIFIED, port)),
+            SocketAddr::from((Ipv4Addr::UNSPECIFIED, *port)),
             Some(device),
         ),
-        Source::Addr(addr) => (addr, None),
+        Source::Addr(addr) => (*addr, None),
     };
 
     let socket = TcpSocket::new_v4()?;
@@ -172,6 +176,17 @@ struct Proxy {
 enum Source {
     Device { device: String, port: u16 },
     Addr(SocketAddr),
+}
+
+/// Formats the same way `FromStr` accepts it, e.g. `tailscale0:5001` or
+/// `0.0.0.0:5000`.
+impl std::fmt::Display for Source {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Device { device, port } => write!(f, "{device}:{port}"),
+            Self::Addr(addr) => write!(f, "{addr}"),
+        }
+    }
 }
 
 impl FromStr for Proxy {
