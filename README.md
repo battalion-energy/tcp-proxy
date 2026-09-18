@@ -61,9 +61,7 @@ The restricted form binds `0.0.0.0`, so IPv6 peers are refused even when the int
 
 `RUST_LOG` sets the level, default `info`. `RUST_LOG=tcp_proxy=debug` scopes it to this crate.
 
-Each listener logs its bound address and target at startup. Per-connection events carry a `conn{id, client, remote}` span. Ids count per listener, so `(remote, id)` identifies a session.
-
-The startup line reports the resolved bind address, not the interface, so a restricted listener logs `0.0.0.0:5001` with nothing naming the device.
+Each listener logs its source and target at startup, with the source written as it was given on the command line, so a restricted listener logs `source=tailscale0:5001`. Per-connection events carry a `conn{id, client, remote}` span. Ids count per listener, so `(remote, id)` identifies a session.
 
 ## Notes
 
