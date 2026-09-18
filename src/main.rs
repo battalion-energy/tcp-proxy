@@ -78,7 +78,8 @@ async fn main() -> anyhow::Result<()> {
 fn configure_listeners(proxies: Vec<Proxy>) -> Result<Vec<(Proxy, TcpListener)>> {
     let mut listeners = Vec::new();
     for proxy in proxies {
-        let listener = bind_listener(&proxy.source)?;
+        let listener = bind_listener(&proxy.source)
+            .with_context(|| format!("unable to listen on {}", proxy.source))?;
         listeners.push((proxy, listener));
     }
     Ok(listeners)
@@ -93,12 +94,17 @@ fn bind_listener(source: &Source) -> Result<TcpListener> {
         Source::Addr(addr) => (*addr, None),
     };
 
-    let socket = TcpSocket::new_v4()?;
+    let socket = if addr.is_ipv6() {
+        TcpSocket::new_v6()?
+    } else {
+        TcpSocket::new_v4()?
+    };
+    // TcpListener::bind sets this for us, TcpSocket does not. Without it a
+    // restart fails to bind while old connections sit in TIME_WAIT.
+    socket.set_reuseaddr(true)?;
 
     if let Some(name) = device {
-        socket
-            .bind_device(Some(name.as_bytes()))
-            .with_context(|| format!("binding to interface: {name}"))?;
+        socket.bind_device(Some(name.as_bytes()))?;
     }
     socket.bind(addr)?;
 
