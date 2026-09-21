@@ -10,6 +10,9 @@ use tracing::Instrument;
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
+#[global_allocator]
+static ALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
 #[derive(Parser, Debug)]
 /// A simple TCP port-forwarding proxy
 ///
